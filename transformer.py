@@ -143,11 +143,26 @@ class Encoder(nn.Module):
         return self.ffwd_block(self.attn_block(x))
 
 class LM(nn.Module):
-    def __init__(self, seq_len, vocab_size, d_model, num_head, num_layers):
+    @staticmethod
+    def positional_encoding(seq_len=32, d_model=64, freq_constant=25):
+        pos = torch.arange(1, seq_len + 1)
+        pos_enc = torch.empty(seq_len, d_model)
+        wave_freq_scaler = freq_constant ** (torch.arange(0, d_model, 2) / d_model)
+        pos_enc[:, ::2] = torch.sin( pos.unsqueeze(1) / wave_freq_scaler[:(d_model - 1) // 2 + 1].unsqueeze(0) )
+        pos_enc[:, 1::2] = torch.cos( pos.unsqueeze(1) / wave_freq_scaler[:d_model // 2].unsqueeze(0) )
+        return pos_enc
+    
+    def __init__(self, seq_len, vocab_size, d_model, num_head, num_layers, positional_encoding_freq_constant):
         super().__init__()
         self.seq_len = seq_len
         self.w_embd = nn.Embedding(vocab_size, d_model)
-        self.pos_embd = nn.Embedding(seq_len, d_model)
+        if positional_encoding_freq_constant != None:
+            self.pos_enc = LM.positional_encoding(seq_len, d_model, positional_encoding_freq_constant)
+            self.positional_encoding = True
+        else:
+            self.pos_embd = nn.Embedding(seq_len, d_model)
+            self.positional_encoding = False
+        
         self.encoder_blocks = nn.Sequential(
             *[Encoder(d_model, num_head) for _ in range(num_layers)]
         )
@@ -155,7 +170,11 @@ class LM(nn.Module):
 
     def forward(self, inputs): # B, seq_len
         assert inputs.shape[1] == block_size, f"seq_len is not {self.seq_len}"
-        x = self.w_embd(inputs) + self.pos_embd(torch.arange(self.seq_len))      # B, seq_len, d_model
+        x = self.w_embd(inputs) # B, seq_len, d_model
+        if self.positional_encoding:
+            x = x + self.pos_enc
+        else:
+            x = x + self.pos_embd(torch.arange(self.seq_len))      
         x = self.encoder_blocks(x)
         return self.pred(x)
     
@@ -176,7 +195,7 @@ class LM(nn.Module):
         return prefix + decode(out_tokens)
 
     
-lm = LM(seq_len=block_size, vocab_size=vocab_size, d_model=64, num_head=8, num_layers=2)
+
 
 def count_params(model):
     count = 0
@@ -184,10 +203,22 @@ def count_params(model):
         count += p.numel()
     print("Number of params:", count)
 
-print(lm)
-count_params(lm)
 
-def train(lm, n_batches, lr, model_name='transformer_2layers.pth'):
+eval_iters = 200
+@torch.no_grad()
+def estimate_loss(model):
+    out = {}
+    model.eval()
+    for split in ['train', 'val']:
+        losses = torch.zeros(eval_iters)
+        for k in range(eval_iters):
+            X, Y = get_batch(split)
+            Y_hat = model(X)
+            losses[k] = F.cross_entropy(Y_hat.view(-1, vocab_size), Y.view(-1))
+        out[split] = losses.mean().item()
+    return out
+
+def train(lm, n_batches, lr, model_name='transformer.pth'):
     optimizer = torch.optim.AdamW(lm.parameters(), lr=lr)
     for i in range(n_batches):
         xb, yb = get_batch('train')
@@ -201,9 +232,18 @@ def train(lm, n_batches, lr, model_name='transformer_2layers.pth'):
         if (i + 1) % 1000 == 0:
             print(i, loss.item())
             print(lm.generate(' ', 2000))
+            val = estimate_loss(lm)
+            print(val)
+            wandb.log(val)
             if model_name != None:
                 torch.save({'epoch': i, 'state': lm.state_dict()}, model_name)
 
-train(lm, 20000, 1e-2)
-train(lm, 20000, 1e-3)
-train(lm, 20000, 1e-4)
+import wandb
+if __name__ == "__main__":
+    lm = LM(seq_len=block_size, vocab_size=vocab_size, d_model=64, num_head=8, num_layers=2, positional_encoding_freq_constant=12)
+    wandb.init(project='transformer_positional_encoding')
+    print(lm)
+    count_params(lm)
+    train(lm, 20000, 1e-2)
+    train(lm, 20000, 1e-3)
+    train(lm, 20000, 1e-4)

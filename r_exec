@@ -1,0 +1,63 @@
+#!/bin/bash
+set -euo pipefail
+usage() {
+  cat <<'EOF'
+No usage available, read the code!
+EOF
+}
+
+SERVER="pab"
+CONTAINER="snn_exp"
+WORK_DIR="/home/remote_exec/"
+DO_RUN="1"
+RUN_FILE=""
+FILES=()
+
+# Parse args
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -w|--work)      WORK_DIR="$2"; shift 2;;
+    -f|--file)      FILES+=("$2"); shift 2;;
+    --run)          RUN_FILE="$2"; shift 2;;
+    --python)       PYTHON="$2"; shift 2;;
+    --no-run)       DO_RUN="0"; shift;;
+    -h|--help)      usage; exit 0;;
+    *) echo "Unknown arg: $1" >&2; usage; exit 2;;
+  esac
+done
+
+# Validate required args
+[[ -n "$SERVER" ]] || { echo "Missing --server" >&2; usage; exit 2; }
+[[ -n "$CONTAINER" ]] || { echo "Missing --container" >&2; usage; exit 2; }
+[[ -n "$WORK_DIR" ]] || { echo "Missing --work" >&2; usage; exit 2; }
+
+# Validate local files exist
+if [[ ${#FILES[@]} -gt 0 ]]; then
+  for f in "${FILES[@]}"; do
+    [[ -f "$f" ]] || { echo "Local file not found: $f" >&2; exit 2; }
+  done
+fi
+
+# Default run file: first file (if not specified)
+if [[ -z "$RUN_FILE" ]]; then
+  RUN_FILE="$(basename "${FILES[0]}")"
+else
+  RUN_FILE="$(basename "$RUN_FILE")"
+fi
+
+# Create destination dir in container
+ssh -t "$SERVER" "docker exec $CONTAINER mkdir -p '$WORK_DIR'"
+
+# Copy each file (innovation: stream over SSH directly into container; no /tmp on server)
+if [[ ${#FILES[@]} -gt 0 ]]; then
+  for f in "${FILES[@]}"; do
+    base="$(basename "$f")"
+    cat "$f" | ssh "$SERVER" "docker exec -i $CONTAINER sh -c 'cat > \"${WORK_DIR}/${base}\"'"
+    echo "Copied: $f -> $SERVER:$CONTAINER:$WORK_DIR/$base"
+  done
+fi
+
+# Run exactly one file (optional)
+if [[ "$DO_RUN" == "1" ]]; then
+  ssh -t "$SERVER" "docker exec -w '$WORK_DIR' -it $CONTAINER python3 $RUN_FILE"
+fi

@@ -10,7 +10,10 @@ env/
 ENV/
 
 # Model files
-*.pth
+**.pth
+**.pt
 
 # Weights & Biases
 wandb/
+
+.env

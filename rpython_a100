@@ -1,0 +1,78 @@
+#!/bin/bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+No usage available, read the code!
+EOF
+}
+
+SERVER="snn_a100_wg"
+WORK_DIR="/home/remote_exec"
+RUN_FILE=""
+FILES=()
+DETACH=0
+TMUX=0
+
+# Parse args
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -w|--work)      WORK_DIR="$2"; shift 2;;
+    -f|--file)      FILES+=("$2"); shift 2;;
+    -R|--run)       RUN_FILE="$2"; shift 2;;
+    -M|--tmux)      TMUX=1; shift 1;;
+    -d|--detach)    DETACH=1; shift 1;;
+    -h|--help)      usage; exit 0;;
+    *)
+      if [[ -n "$RUN_FILE" ]]; then
+        echo "Multiple run files specified: '$RUN_FILE' and '$1'" >&2
+        exit 2
+      fi
+      RUN_FILE="$1"
+      shift 1
+      ;;
+  esac
+done
+
+# Validate required args
+[[ -n "$SERVER" ]]   || { echo "Missing server" >&2; usage; exit 2; }
+[[ -n "$WORK_DIR" ]] || { echo "Missing --work" >&2; usage; exit 2; }
+
+# Default run file, copy only if specified
+if [[ -n "$RUN_FILE" ]]; then
+  FILES+=("$RUN_FILE")
+  RUN_FILE="$(basename "$RUN_FILE")"
+fi
+
+# Validate local files exist
+if [[ ${#FILES[@]} -gt 0 ]]; then
+  for f in "${FILES[@]}"; do
+    [[ -f "$f" ]] || { echo "Local file not found: $f" >&2; exit 2; }
+  done
+fi
+
+# Create destination dir on remote host
+ssh -t "$SERVER" "mkdir -p '$WORK_DIR'"
+
+# Copy each file (stream over SSH; no remote /tmp needed)
+if [[ ${#FILES[@]} -gt 0 ]]; then
+  for f in "${FILES[@]}"; do
+    base="$(basename "$f")"
+    cat "$f" | ssh "$SERVER" "sh -c 'cat > \"${WORK_DIR}/${base}\"'"
+    echo "Copied: $f -> $SERVER:$WORK_DIR/$base"
+  done
+fi
+
+# Run file
+if [[ -n "$RUN_FILE" ]]; then
+  if (( ! TMUX )); then
+    ssh -t "$SERVER" "cd '$WORK_DIR' && python3 '$RUN_FILE'"
+  else
+    # Create a detached tmux session and capture its name
+    SESS_ID="$(ssh -t "$SERVER" "tmux new-session -d -P -F '#S'" | tr -d '\r\n')"
+    ssh -t "$SERVER" "tmux send-keys -t '$SESS_ID' \"cd '$WORK_DIR' && python3 '$RUN_FILE'\" C-m"
+    if (( ! DETACH )); then
+      ssh -t "$SERVER" "tmux attach -t '$SESS_ID'"
+    fi
+  fi
+fi

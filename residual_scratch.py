@@ -158,7 +158,6 @@ def collect_stats():
     sns.heatmap(r_vanish, cmap='RdYlBu')
     plt.show()
 # %%
-
 def eval_model(model, loader, device, criterion):
     model.eval()
     correct = total = 0

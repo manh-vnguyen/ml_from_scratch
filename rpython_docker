@@ -5,59 +5,66 @@ usage() {
 No usage available, read the code!
 EOF
 }
-
 SERVER="pab"
 CONTAINER="snn_exp"
-WORK_DIR="/home/remote_exec/"
-DO_RUN="1"
+WORK_DIR="/home/remote_exec"
 RUN_FILE=""
 FILES=()
-
+DETACH=0
+TMUX=0
 # Parse args
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -w|--work)      WORK_DIR="$2"; shift 2;;
     -f|--file)      FILES+=("$2"); shift 2;;
-    --run)          RUN_FILE="$2"; shift 2;;
-    --python)       PYTHON="$2"; shift 2;;
-    --no-run)       DO_RUN="0"; shift;;
+    -R|--run)          RUN_FILE="$2"; shift 2;;
+    -M|--tmux)            TMUX=1; shift 1;;
+    -d|--detach)          DETACH=1; shift 1;;
     -h|--help)      usage; exit 0;;
-    *) echo "Unknown arg: $1" >&2; usage; exit 2;;
+    *)
+      if [[ -n "$RUN_FILE" ]]; then
+        echo "Multiple run files specified: '$RUN_FILE' and '$1'" >&2
+        exit 2
+      fi
+      RUN_FILE="$1"
+      shift 1
+      ;;
   esac
 done
-
 # Validate required args
 [[ -n "$SERVER" ]] || { echo "Missing --server" >&2; usage; exit 2; }
 [[ -n "$CONTAINER" ]] || { echo "Missing --container" >&2; usage; exit 2; }
 [[ -n "$WORK_DIR" ]] || { echo "Missing --work" >&2; usage; exit 2; }
-
+# Default run file, copy only if not specified
+if [[ -n "$RUN_FILE" ]]; then
+  FILES+=("$RUN_FILE")
+  RUN_FILE="$(basename "$RUN_FILE")"
+fi
 # Validate local files exist
 if [[ ${#FILES[@]} -gt 0 ]]; then
   for f in "${FILES[@]}"; do
     [[ -f "$f" ]] || { echo "Local file not found: $f" >&2; exit 2; }
   done
 fi
-
-# Default run file: first file (if not specified)
-if [[ -z "$RUN_FILE" ]]; then
-  RUN_FILE="$(basename "${FILES[0]}")"
-else
-  RUN_FILE="$(basename "$RUN_FILE")"
-fi
-
 # Create destination dir in container
 ssh -t "$SERVER" "docker exec $CONTAINER mkdir -p '$WORK_DIR'"
-
 # Copy each file (innovation: stream over SSH directly into container; no /tmp on server)
 if [[ ${#FILES[@]} -gt 0 ]]; then
   for f in "${FILES[@]}"; do
     base="$(basename "$f")"
     cat "$f" | ssh "$SERVER" "docker exec -i $CONTAINER sh -c 'cat > \"${WORK_DIR}/${base}\"'"
-    echo "Copied: $f -> $SERVER:$CONTAINER:$WORK_DIR/$base"
+    echo "Copied: $f -> $SERVER($CONTAINER):$WORK_DIR/$base"
   done
 fi
-
-# Run exactly one file (optional)
-if [[ "$DO_RUN" == "1" ]]; then
-  ssh -t "$SERVER" "docker exec -w '$WORK_DIR' -it $CONTAINER python3 $RUN_FILE"
+# Run file
+if [[ -n "$RUN_FILE" ]]; then
+  if (( ! TMUX )); then
+    ssh -t "$SERVER" "docker exec -w $WORK_DIR -it $CONTAINER python3 $RUN_FILE"
+  else
+    SESS_ID=$(ssh -t $SERVER docker exec -it -w $WORK_DIR $CONTAINER "tmux new-session -d -P -F '#S'"| tr -d '\r\n')
+    ssh -t $SERVER "docker exec -it $CONTAINER tmux send-keys -t $SESS_ID 'python3 $RUN_FILE' C-m"
+    if (( ! DETACH )); then
+      ssh -t $SERVER "docker exec -it $CONTAINER tmux attach -t $SESS_ID"
+    fi
+  fi
 fi

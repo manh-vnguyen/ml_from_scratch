@@ -5,8 +5,6 @@ from torch import optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
-
-
 class VGG(nn.Module):
     def __init__(self, conv, cls, C, H, W):
         super(VGG, self).__init__()
@@ -24,14 +22,14 @@ class VGG(nn.Module):
                 net.append(nn.MaxPool2d(kernel_size=2, stride=2))
                 shrink = shrink * 2
                 
-
-        
         net.append(nn.Flatten())
         C = C * (H // shrink) * (W // shrink)
         for l in cls:
             if isinstance(l, int):
-                net.append(nn.Linear(C, l, bias=False))
+                net.append(nn.Linear(C, l, bias=True))
                 C = l
+            if isinstance(l, float):
+                net.append(nn.Dropout(l))
             elif l == 'norm':
                 net.append(nn.BatchNorm1d(C))
             elif l == 'act':
@@ -56,7 +54,7 @@ def vgg19(num_classes, C, H, W):
             256, 'norm', 'act', 256, 'norm', 'act', 256, 'norm', 'act', 256, 'norm', 'act', 'pool',
             512, 'norm', 'act', 512, 'norm', 'act', 512, 'norm', 'act', 512, 'norm', 'act', 'pool',
             512, 'norm', 'act', 512, 'norm', 'act', 512, 'norm', 'act', 512, 'norm', 'act', 'pool',]
-    cls = [4096, 'norm', 'act', 4096, 'norm', 'act', num_classes]
+    cls = [4096, 0.5, 'act', 4096, 0.5, 'act', num_classes]
     return VGG(conv, cls, C, H, W)
 
 # %% 
@@ -76,12 +74,8 @@ def get_data(ds):
             transforms.ToTensor(),
             transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
         ])
-
-        
         train_ds = datasets.CIFAR10(root="/tmp/data", train=True, download=True, transform=transform)
         test_ds = datasets.CIFAR10(root="/tmp/data", train=False, download=True, transform=transform)
-        train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
-        test_loader = DataLoader(test_ds, batch_size=256, shuffle=False)
     elif ds == 'CIFAR100':
         transform = transforms.Compose([
             transforms.ToTensor(),
@@ -90,8 +84,22 @@ def get_data(ds):
 
         train_ds = datasets.CIFAR100(root="/tmp/data", train=True, download=True, transform=transform)
         test_ds = datasets.CIFAR100(root="/tmp/data", train=False, download=True, transform=transform)
-        train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
-        test_loader = DataLoader(test_ds, batch_size=256, shuffle=False)
+    elif ds == 'ImageNet':
+        # root = "/mnt/9a2c028e-6c0b-4d1a-ada1-2349e5ef78f7/data/ImageNet2012"
+        root = "/home/data/ImageNet"
+        common_transform = transforms.Compose([
+            transforms.Resize(256),                            # keep aspect ratio; shorter side -> 256
+            transforms.CenterCrop(224),                        # fixed 224x224 crop
+            transforms.ToTensor(),                             # PIL [0..255] -> float tensor [0..1], CxHxW
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],    # ImageNet channel-wise normalization
+                                std=[0.229, 0.224, 0.225]),
+        ])
+
+        train_ds = datasets.ImageNet(root=root, split="train", transform=common_transform)
+        test_ds = datasets.ImageNet(root=root, split="val",   transform=common_transform)
+    
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
+    test_loader = DataLoader(test_ds, batch_size=256, shuffle=False)
     return train_loader, test_loader
 
 #%%
@@ -136,7 +144,7 @@ def train(model, epochs, device, train_loader, test_loader, wandb_run):
     # Model, loss, optimizer
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
     # param_groups = get_parameter_groups(model, weight_decay=1e-4)
-    optimizer = optim.AdamW(model.parameters(), lr=1e-2)
+    optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=5e-4)
     lr_scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer=optimizer, T_0=32, eta_min=1e-6)
 
     # Train
@@ -166,19 +174,16 @@ def train(model, epochs, device, train_loader, test_loader, wandb_run):
 # %%
 if __name__ == '__main__':
     import wandb
-    device = 'cuda'
-    ds = 'CIFAR100'
+    device = 'cuda:5'
+    ds = 'ImageNet'
     train_loader, test_loader = get_data(ds)
-    model = vgg19(num_classes=100, C=3, H=32, W=32).to(device)
-    run = wandb.init(project='VGG', 
-                     notes="vgg19(num_classes=100, C=3, H=32, W=32)"
-                    )
+    print("Data done")
+    model = vgg19(num_classes=1000, C=3, H=224, W=224).to(device)
+    run = wandb.init(project='VGG')
     print(model)
     if run is not None:
         run.tags += (f"count_params={count_params(model)}",)
         run.tags += (f"batch_size={BATCH_SIZE}",)
         run.tags += (f"ds={ds}",)
-    train(model, 100,'cuda', train_loader, test_loader, wandb_run=run)
+    train(model, 100, device, train_loader, test_loader, wandb_run=run)
     run.finish()
-
-__all__ = ['vgg9', 'vgg19']
